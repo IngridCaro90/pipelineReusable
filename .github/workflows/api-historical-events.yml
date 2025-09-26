@@ -4,12 +4,11 @@ on:
   workflow_call:
     inputs:
       MONTH:
-        description: 'Ingrese el número del mes'
+        description: 'Ingrese el número del mes (01-12)'
         required: true
         type: string
-
       DAY:
-        description: 'Ingrese el número del día'
+        description: 'Ingrese el número del día (01-31)'
         required: true
         type: string
 
@@ -68,51 +67,4 @@ jobs:
             else
               echo "response.json no contiene JSON válido."
               echo "events=[]" >> $GITHUB_OUTPUT
-              echo "events_count=0" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "response.json vacío. No se pudieron extraer eventos."
-            echo "events=[]" >> $GITHUB_OUTPUT
-            echo "events_count=0" >> $GITHUB_OUTPUT
-          fi
-  pdf-generation:
-    name: Generate PDF with historical events
-    runs-on: ubuntu-latest
-    needs: fetch-events
-    if: needs.fetch-events.outputs.events-count != '0'
-    strategy:
-      fail-fast: false
-      matrix:
-        page: ${{ fromJson(needs.fetch-events.outputs.events-list) }}
-
-    steps:
-      - name: Save name for PDF
-        id: save-pdf-name
-        run: |
-          TITLE_EVENT=$(echo "${{ matrix.page.title }}" | tr ' ' '_' | tr -cd '[:alnum:]_')
-          NAME_PDF="${{ inputs.MONTH }}-${{ inputs.DAY }}-${TITLE_EVENT}.pdf"
-          echo "NAME_PDF=$NAME_PDF" >> $GITHUB_ENV
-
-      - name: Cached PDF generated
-        id: cache-pdf
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.NAME_PDF }}
-          key: pdf-${{ env.NAME_PDF }}
-
-      - name: Descargar página HTML
-        run: curl -L "${{ matrix.page.url }}" -o page.html
-
-      - name: Generate PDF from HTML
-        if: ${{ steps.cache-pdf.outputs.cache-hit != 'true' }}
-        uses: fifsky/html-to-pdf-action@master
-        with:
-          htmlFile: page.html
-          outputFile: ${{ env.NAME_PDF }}
-
-      - name: Upload PDF as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.NAME_PDF }}
-          path: ${{ env.NAME_PDF }}
-          retention-days: 1
+              echo "events_count=0" >> $G_
