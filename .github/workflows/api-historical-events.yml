@@ -1,70 +1,119 @@
-name: api-historical-events
+name: Eventos historicos wikipedia
 
 on:
   workflow_call:
     inputs:
-      MONTH:
-        description: 'Ingrese el número del mes (01-12)'
+      dia:
+        description: Ingrese día (DD)
         required: true
         type: string
-      DAY:
-        description: 'Ingrese el número del día (01-31)'
+      mes:
+        description: Ingrese mes (MM)
         required: true
         type: string
 
 jobs:
-  fetch-events:
-    name: Fetch historical events from cached response API
+  consultar-wikimedia:
+    name: consultar wikimedia
     runs-on: ubuntu-latest
     outputs:
-      events-list: ${{ steps.consult-json.outputs.events }}
-      events-count: ${{ steps.consult-json.outputs.events_count }}
-
+      events-json: ${{ steps.get-json.outputs.events }}
     steps:
-      - name: Restore cache
-        id: cache-restored
-        uses: actions/cache/restore@v4
+      - name: Preparar variables
+        id: vars
+        run: |
+          MES="${{ inputs.mes }}"
+          DIA="${{ inputs.dia }}"
+          LANG="${{ vars.LANG }}"
+          echo "MES=$MES" >> $GITHUB_ENV
+          echo "DIA=$DIA" >> $GITHUB_ENV
+          echo "LANG=$LANG" >> $GITHUB_ENV
+          echo "DATE_LANG=${LANG}-${MES}-${DIA}" >> $GITHUB_ENV
+
+      - name: Crear hash
+        id: json_hash
+        run: |
+          echo "hash=$(echo -n '${{ env.DATE_LANG }}' | sha256sum | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Restaurar cache de la API
+        id: cache-json
+        uses: actions/cache@v4
+        env:
+          cache-name: cache json
         with:
-          path: response.json
-          key: ${{ runner.os }}-${{ vars.LANG }}-${{ inputs.MONTH }}-${{ inputs.DAY }}
+          path: wiki.json
+          key: ${{ runner.os }}-${{ env.cache-name }}-${{ steps.json_hash.outputs.hash }}
 
-      - name: Fetch historical events from API response (Only if not cached)
-        id: response-api
-        if: steps.cache-restored.outputs.cache-hit != 'true'
+      - name: Llamar API de Wikimedia si no hay cache
+        if: ${{ steps.cache-json.outputs.cache-hit != 'true' }}
         run: |
-          curl -s "https://api.wikimedia.org/feed/v1/wikipedia/${{ vars.LANG }}/onthisday/selected/${{ inputs.MONTH }}/${{ inputs.DAY }}" -o response.json
-          echo "file=response.json" >> $GITHUB_OUTPUT
-          echo "API response fetched and saved to file."
+          echo "Consultando API wikimedia..."
+          STATUS=$(curl -sL -w "%{http_code}" -o wiki.json.tmp \
+            "https://api.wikimedia.org/feed/v1/wikipedia/${LANG}/onthisday/all/${MES}/${DIA}" \
+            --header "User-Agent: GitHubActions-Efemerides/1.0")
 
-      - name: Compute hash
-        id: compute_hash
+          if [ "$STATUS" -eq 200 ]; then
+            mv wiki.json.tmp wiki.json
+          else
+            echo "Error en API (HTTP $STATUS). No se encontraron eventos."
+            echo "[]" > wiki.json
+          fi
+
+      - name: Extraer eventos para matrix
+        id: get-json
         run: |
-          echo "hash=$(echo -n '${{ vars.LANG }}-${{ inputs.MONTH }}-${{ inputs.DAY }}' | sha256sum | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
-
-      - name: Save response.json to cache
-        uses: actions/cache/save@v4
-        with:
-          path: response.json
-          key: ${{ runner.os }}-${{ vars.LANG }}-${{ inputs.MONTH }}-${{ inputs.DAY }}
-
-      - name: Substract events from response.json
-        id: consult-json
-        run: |
-          if [ -s response.json ]; then
-            if jq empty response.json 2>/dev/null; then
-              COUNT=$(jq '.selected | length' response.json)
-              if [ "$COUNT" -eq 0 ]; then
-                echo "Don't find events for the ${{ inputs.MONTH }}/${{ inputs.DAY }}."
-                echo "events=[]" >> $GITHUB_OUTPUT
-                echo "events_count=0" >> $GITHUB_OUTPUT
-              else
-                jq -c '[.selected[] | {title: .pages[0].title, url: .pages[0].content_urls.desktop.page}]' response.json > events_list.json
-                EVENTS=$(cat events_list.json)
-                echo "Se encontraron $COUNT eventos."
-                echo "events=$EVENTS" >> $GITHUB_OUTPUT
-                echo "events_count=$COUNT" >> $GITHUB_OUTPUT
-              fi
-            else
-              echo "response.json no contiene JSON válido."
+          if [ -s wiki.json ]; then
+            COUNT=$(jq '.selected | length' wiki.json)
+            if [ "$COUNT" -eq 0 ]; then
+              echo "No se encontraron eventos para la fecha ${DIA}/${MES}."
               echo "events=[]" >> $GITHUB_OUTPUT
-              echo "events_count=0" >> $G_
+            else
+              jq -c '[.selected[] | {title: .pages[0].title, url: .pages[0].content_urls.desktop.page}]' wiki.json > events.json
+              EVENTS=$(cat events.json)
+              echo "Se encontraron $COUNT eventos."
+              echo "events=$EVENTS" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "wiki.json vacío. No se pudieron extraer eventos."
+            echo "events=[]" >> $GITHUB_OUTPUT
+          fi
+
+  generar-pdfs:
+    name: generar pdfs
+    needs: consultar-wikimedia
+    runs-on: ubuntu-latest
+    if: ${{ needs.consultar-wikimedia.outputs.events-json != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        page: ${{ fromJson(needs.consultar-wikimedia.outputs.events-json) }}
+    steps:
+      - name: Guardar nombre de PDF
+        run: |
+          SAFE_TITLE=$(echo "${{ matrix.page.title }}" | tr ' ' '_' | tr -cd '[:alnum:]_')
+          PDF_NAME="${{ inputs.mes }}-${{ inputs.dia }}-${SAFE_TITLE}.pdf"
+          echo "PDF_NAME=$PDF_NAME" >> $GITHUB_ENV
+
+      - name: Cache PDF generado
+        id: cache-pdf
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PDF_NAME }}
+          key: pdf-${{ env.PDF_NAME }}
+
+      - name: Descargar página HTML
+        run: curl -L "${{ matrix.page.url }}" -o page.html
+
+      - name: Generar PDF desde HTML
+        if: ${{ steps.cache-pdf.outputs.cache-hit != 'true' }}
+        uses: fifsky/html-to-pdf-action@master
+        with:
+          htmlFile: page.html
+          outputFile: ${{ env.PDF_NAME }}
+
+      - name: Subir PDF como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PDF_NAME }}
+          path: ${{ env.PDF_NAME }}
+          retention-days: 1
